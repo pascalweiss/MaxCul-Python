@@ -130,9 +130,7 @@ def store_thermostatstate(sender, **kw):
 @app.route("/")
 def index():
     return "<a href='" + url_for("get_devices") + "'>Tracked devices</a><br>" + \
-           "<a href='" + url_for("current_thermostat_states") + "'>Current thermostat states</a><br>" + \
-           "<a href='" + url_for("current_shuttercontact_states") + "'>Current shuttercontact states</a><br>" + \
-           "<a href='" + url_for("current_wallthermostat_states") + "'>Current wallthermostat states</a><br>" + \
+           "<a href='" + url_for("current_states") + "'>Current thermostat states</a><br>" + \
            "<a href='" + url_for("set_temp") + "'>Set one temp</a><br>" + \
            "<a href='" + url_for("set_time") + "'>Set time</a><br>" + \
            "<a href='" + url_for("set_boost_config") + "'>Set boost</a><br>" + \
@@ -141,20 +139,10 @@ def index():
            "<a href='" + url_for("set_config_temperature") + "'>Set config temperature</a><br>" + \
            "<a href='" + url_for("set_temp_all") + "'>Set temp on all sensors</a>"
 
-@app.route("/current_thermostat_states")
-def current_thermostat_states():
-    with message_thread.thermostat_states_lock:
-        return json.dumps(message_thread.thermostat_states, indent=4, sort_keys=True, cls=JSONWithDateEncoder)
-
-@app.route("/current_shuttercontact_states")
-def current_shuttercontact_states():
-    with message_thread.shuttercontact_states_lock:
-        return json.dumps(message_thread.shuttercontact_states, indent=4, sort_keys=True, cls=JSONWithDateEncoder)
-
-@app.route("/current_wallthermostat_states")
-def current_wallthermostat_states():
-    with message_thread.wallthermostat_states_lock:
-        return json.dumps(message_thread.wallthermostat_states, indent=4, sort_keys=True, cls=JSONWithDateEncoder)
+@app.route("/current_states")
+def current_states():
+    with message_thread.states_lock:
+        return json.dumps(message_thread.states, indent=4, sort_keys=True, cls=JSONWithDateEncoder)
 
 
 @app.route("/get_devices")
@@ -180,11 +168,7 @@ def set_temp():
         content += """</select><select name="mode"><option>auto</option><option selected>manual</option><option>boost</option></select>"""
         content += """<input type=text name=temperature><input type=submit value="set"></form></html>"""
         return content
-    msg = SetTemperatureMessage()
-    msg.counter = 0xB9
-    msg.sender_id = CUBE_ID
-    msg.receiver_id = int(request.form['thermostat'])
-    msg.group_id = 0
+    msg = SetTemperatureMessage(0xB9, 0, CUBE_ID, int(request.form['thermostat']), 0)
     payload = {
         'desired_temperature': float(request.form["temperature"]),
         'mode': request.form["mode"],

@@ -71,13 +71,13 @@ BOOST_DURATION = {
 class MoritzMessage(object):
     """Represents (de)coded message as seen on Moritz Wire"""
 
-    def __init__(self):
-        self.counter = 0
-        self.flag = 0
-        self.sender_id = 0
-        self.receiver_id = 0
-        self.group_id = 0
-        self.payload = ""
+    def __init__(self, counter=0, flag=0, sender_id=0, receiver_id=0, group_id=0, payload={}):
+        self.counter = counter
+        self.flag = flag
+        self.sender_id = sender_id
+        self.receiver_id = receiver_id
+        self.group_id = group_id
+        self.payload = payload
 
     @property
     def decoded_payload(self):
@@ -178,7 +178,6 @@ class PairPongMessage(MoritzMessage):
     def decoded_payload(self):
         return {'devicetype': DEVICE_TYPES[int(self.payload)]}
 
-
     def encode_payload(self, payload):
         return str(DEVICE_TYPES_BY_NAME[payload['devicetype']]).zfill(2)
 
@@ -195,6 +194,8 @@ class AckMessage(MoritzMessage):
             result["state"] = "ok"
         elif self.payload.startswith("81"):
             result["state"] = "invalid_command"
+        elif self.payload.startswith("00"):
+            result["state"] = "ignore"
         if len(self.payload) == 8:
             # FIXME: temporarily accepting the fact that we only handle Thermostat results
             result.update(ThermostatStateMessage.decode_status(self.payload[2:]))
@@ -391,10 +392,10 @@ class ShutterContactStateMessage(MoritzMessage):
     @staticmethod
     def decode_status(payload):
         status_bits = bin(int(payload, 16))[2:].zfill(8)
-        state = int(status_bits[6:],2)
-        unkbits = int(status_bits[2:6],2)
-        rferror = int(status_bits[1],2)
-        battery_low = int(status_bits[0],2)
+        state = int(status_bits[6:], 2)
+        unkbits = int(status_bits[2:6], 2)
+        rferror = int(status_bits[1], 2)
+        battery_low = int(status_bits[0], 2)
         result = {
             "state": SHUTTER_STATES[state],
             "unkbits": unkbits,
@@ -455,8 +456,8 @@ class WallThermostatControlMessage(MoritzMessage):
         rawTempratures = bin(int(payload, 16))[2:].zfill(16)
 
         result = {
-            "desired_temprature": int(rawTempratures[1:8], 2)/2,
-            "temprature": ((int(rawTempratures[0], 2) << 8) + int(rawTempratures[8:], 2))/10
+            "desired_temperature": int(rawTempratures[1:8], 2)/2,
+            "temperature": ((int(rawTempratures[0], 2) << 8) + int(rawTempratures[8:], 2))/10
         }
         return result
 
@@ -475,7 +476,21 @@ class SetEcoTemperatureMessage(MoritzMessage):
 
 
 class PushButtonStateMessage(MoritzMessage):
-    pass
+
+    @property
+    def decoded_payload(self):
+        #TODO: No plan, what to do with the two bits in the middle.
+        status_bits = bin(int(self.payload[0], 16))[2:].zfill(3)
+        state = int(self.payload[3], 2)
+        langateway = int(status_bits[2], 2)
+        rferror = int(status_bits[0], 2)
+        battery_low = int(status_bits[1], 2)
+        return {
+            "state": bool(state),
+            "rferror": bool(rferror),
+            "battery_low": bool(battery_low),
+            "langateway": bool(langateway)
+        }
 
 
 class ThermostatStateMessage(MoritzMessage):

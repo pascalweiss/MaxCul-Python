@@ -16,7 +16,7 @@
 # environment constants
 
 # python imports
-from collections import defaultdict
+from collections import defaultdict, deque
 from datetime import datetime
 import queue
 import threading
@@ -24,7 +24,7 @@ import time
 
 # environment imports
 import logbook
-from serial import Serial
+import serial
 
 # custom imports
 from maxcul.exceptions import MoritzError
@@ -36,6 +36,7 @@ from maxcul.messages import (
     ThermostatStateMessage,
     AckMessage,
     ShutterContactStateMessage,
+    PushButtonStateMessage,
     ConfigValveMessage,
     SetGroupIdMessage,
     AddLinkPartnerMessage,
@@ -121,12 +122,12 @@ class CULComThread(threading.Thread):
     def _init_cul(self):
         """Ensure CUL reports reception strength and does not do FS messages"""
 
-        self.com_port = Serial(self.device_path, self.baudrate)
+        self.com_port = serial.Serial(self.device_path, self.baudrate)
         self._read_result()
         # get CUL FW version
         def _get_cul_ver():
-            self.send_command("V")
-            time.sleep(0.3)
+            self.send_command('V')
+            time.sleep(0.5)
             self.cul_version = self._read_result() or ""
         for i in range(10):
             _get_cul_ver()
@@ -134,30 +135,30 @@ class CULComThread(threading.Thread):
                 com_logger.info("CUL reported version %s" % self.cul_version)
                 break
             else:
-                com_logger.info("No version from CUL reported?")
+                com_logger.info("No version from CUL reported??")
         if not self.cul_version:
             com_logger.info("No version from CUL reported. Closing and re-opening port")
             self.com_port.close()
-            self.com_port = Serial(self.device_path, self.baudrate)
+            self.com_port = serial.Serial(self.device_path, self.baudrate)
             for i in range(10):
                 _get_cul_ver()
                 if self.cul_version:
                     com_logger.info("CUL reported version %s" % self.cul_version)
                 else:
-                    com_logger.info("No version from CUL reported?")
+                    com_logger.info("No version from CUL reported???")
             com_logger.error("No version from CUL, cannot communicate")
             self.stop_requested.set()
             return
 
         # enable reporting of message strength
         self.send_command("X21")
-        time.sleep(0.3)
+        time.sleep(0.5)
         # receive Moritz messages
         self.send_command("Zr")
-        time.sleep(0.3)
+        time.sleep(0.5)
         # disable FHT mode by setting station to 0000
         self.send_command("T01")
-        time.sleep(0.3)
+        time.sleep(0.5)
         self._read_result()
 
     @property
@@ -172,12 +173,11 @@ class CULComThread(threading.Thread):
         if command.startswith("Zs"):
             self._pending_budget = 0
         self.com_port.write((command + "\r\n").encode())
-        com_logger.debug("sent: %s" % command)
+        #com_logger.debug("sent: %s" % command)
 
     def _read_result(self):
         """Reads data from port, if it's a Moritz message, forward directly, otherwise return to caller"""
-
-        while self.com_port.inWaiting():
+        while self.com_port.in_waiting:
             self.pending_line.append(self.com_port.read(1).decode("utf-8"))
             if self.pending_line[-1] == "\n":
                 # remove newlines at the end
@@ -196,12 +196,9 @@ class CULMessageThread(threading.Thread):
     def __init__(self, command_queue, device_path, baudrate):
         super(CULMessageThread, self).__init__()
         self.command_queue = command_queue
-        self.thermostat_states = defaultdict(dict)
-        self.thermostat_states_lock = threading.Lock()
-        self.shuttercontact_states = defaultdict(dict)
-        self.shuttercontact_states_lock = threading.Lock()
-        self.wallthermostat_states = defaultdict(dict)
-        self.wallthermostat_states_lock = threading.Lock()
+        self.states = defaultdict(dict)
+        self.ackList = deque(['', '', '', '', ''])
+        self.states_lock = threading.Lock()
         self.com_send_queue = queue.Queue()
         self.com_receive_queue = queue.Queue()
         self.com_thread = CULComThread(self.com_send_queue, self.com_receive_queue, device_path, baudrate)
@@ -217,6 +214,8 @@ class CULMessageThread(threading.Thread):
             try:
                 received_msg = self.com_receive_queue.get(True, 0.05)
                 message = MoritzMessage.decode_message(received_msg[:-2])
+                if message.receiver_id == CUBE_ID:
+                    self.ackReact(message)
                 signal_strength = int(received_msg[-2:], base=16)
                 self.respond_to_message(message, signal_strength)
             except queue.Empty:
@@ -228,8 +227,8 @@ class CULMessageThread(threading.Thread):
                 tempMsg = self.command_queue.get(True, 0.05)
                 msg, payload = tempMsg
                 raw_message = msg.encode_message(payload)
-                message_logger.debug("send type %s" % msg)
-                message_logger.debug("send raw line %s" % raw_message)
+                #message_logger.debug("send type %s" % msg)
+                #message_logger.debug("send raw line %s" % raw_message)
                 self.com_send_queue.put(raw_message)
             except queue.Empty:
                 pass
@@ -244,13 +243,18 @@ class CULMessageThread(threading.Thread):
         super(CULMessageThread, self).join(timeout)
 
     def ackReact(self, msg):
-        ack_msg = AckMessage()
-        ack_msg.counter = msg.counter + 1
-        ack_msg.sender_id = CUBE_ID
-        ack_msg.receiver_id = msg.sender_id
-        ack_msg.group_id = msg.group_id
-        message_logger.info("ack requested by 0x%X, responding" % msg.sender_id)
-        self.command_queue.put((ack_msg, "00"))
+        if not any(reacts for reacts in self.ackList if (str(msg.counter)+str(msg.sender_id)) in reacts):
+            ack_msg = AckMessage()
+            ack_msg.counter = msg.counter
+            ack_msg.sender_id = CUBE_ID
+            ack_msg.receiver_id = msg.sender_id
+            ack_msg.group_id = msg.group_id
+            self.command_queue.put((ack_msg, "00"))
+            message_logger.info("ack requested by 0x%X, responding with %s" % (msg.sender_id, ack_msg))
+            self.ackList.appendleft(str(msg.counter)+str(msg.sender_id))
+            self.ackList.pop()
+        else:
+            message_logger.info("react only one time with a ack to save budget.")
 
     def respond_to_message(self, msg, signal_strenth):
         """Internal function to respond to incoming messages where appropriate"""
@@ -308,64 +312,65 @@ class CULMessageThread(threading.Thread):
                 return
 
         elif isinstance(msg, ThermostatStateMessage):
-            with self.thermostat_states_lock:
+            with self.states_lock:
                 message_logger.info("thermostat state updated for 0x%X" % msg.sender_id)
-                self.thermostat_states[msg.sender_id].update(msg.decoded_payload)
-                self.thermostat_states[msg.sender_id]['last_updated'] = datetime.now()
-                self.thermostat_states[msg.sender_id]['signal_strenth'] = signal_strenth
-                if msg.receiver_id == CUBE_ID:
-                    self.ackReact(msg)
+                self.states[msg.sender_id].update(msg.decoded_payload)
+                self.states[msg.sender_id]['last_updated'] = datetime.now()
+                self.states[msg.sender_id]['signal_strenth'] = signal_strenth
             thermostatstate_received.send(self, msg=msg)
             return
 
         elif isinstance(msg, AckMessage):
-            if msg.decoded_payload["state"] == "ok":
+            if msg.decoded_payload.get("state","fail") == "ok":
                 thermostatstate_received.send(self, msg=msg)
-                with self.thermostat_states_lock:
+                with self.states_lock:
                     message_logger.info("ack and thermostat state updated for 0x%X" % msg.sender_id)
-                    self.thermostat_states[msg.sender_id].update(msg.decoded_payload)
-                    self.thermostat_states[msg.sender_id]['last_updated'] = datetime.now()
-                    self.thermostat_states[msg.sender_id]['signal_strenth'] = signal_strenth
+                    self.states[msg.sender_id].update(msg.decoded_payload)
+                    self.states[msg.sender_id]['last_updated'] = datetime.now()
+                    self.states[msg.sender_id]['signal_strenth'] = signal_strenth
+                return
+            elif msg.decoded_payload.get("state","fail") == "ignore":
+                message_logger.info("ack message from cube. maybe me. ignore it")
                 return
 
         elif isinstance(msg, ShutterContactStateMessage):
-            with self.shuttercontact_states_lock:
+            with self.states_lock:
                 message_logger.info("shuttercontact updated %s" % msg)
-                self.shuttercontact_states[msg.sender_id].update(msg.decoded_payload)
-                self.shuttercontact_states[msg.sender_id]['last_updated'] = datetime.now()
-                self.shuttercontact_states[msg.sender_id]['signal_strenth'] = signal_strenth
-                if msg.receiver_id == CUBE_ID:
-                    self.ackReact(msg)
+                self.states[msg.sender_id].update(msg.decoded_payload)
+                self.states[msg.sender_id]['last_updated'] = datetime.now()
+                self.states[msg.sender_id]['signal_strenth'] = signal_strenth
             return
 
         elif isinstance(msg, WallThermostatStateMessage):
-            with self.wallthermostat_states_lock:
+            with self.states_lock:
                 message_logger.info("wallthermostat updated %s" % msg)
-                self.wallthermostat_states[msg.sender_id].update(msg.decoded_payload)
-                self.wallthermostat_states[msg.sender_id]['last_updated'] = datetime.now()
-                self.wallthermostat_states[msg.sender_id]['signal_strenth'] = signal_strenth
-                if msg.receiver_id == CUBE_ID:
-                    self.ackReact(msg)
+                self.states[msg.sender_id].update(msg.decoded_payload)
+                self.states[msg.sender_id]['last_updated'] = datetime.now()
+                self.states[msg.sender_id]['signal_strenth'] = signal_strenth
             return
 
         elif isinstance(msg, SetTemperatureMessage):
-            with self.wallthermostat_states_lock:
-                message_logger.info("wallthermostat updated %s" % msg)
-                self.wallthermostat_states[msg.sender_id].update(msg.decoded_payload)
-                self.wallthermostat_states[msg.sender_id]['last_updated'] = datetime.now()
-                self.wallthermostat_states[msg.sender_id]['signal_strenth'] = signal_strenth
-                if msg.receiver_id == CUBE_ID:
-                    self.ackReact(msg)
+            with self.states_lock:
+                message_logger.info("new temperature for thermostat %s" % msg)
+                self.states[msg.sender_id].update(msg.decoded_payload)
+                self.states[msg.sender_id]['last_updated'] = datetime.now()
+                self.states[msg.sender_id]['signal_strenth'] = signal_strenth
             return
 
         elif isinstance(msg, WallThermostatControlMessage):
-            with self.wallthermostat_states_lock:
-                message_logger.info("wallthemostat control update %s" % msg)
-                self.wallthermostat_states[msg.sender_id].update(msg.decoded_payload)
-                self.wallthermostat_states[msg.sender_id]['last_updated'] = datetime.now()
-                self.wallthermostat_states[msg.sender_id]['signal_strenth'] = signal_strenth
-                if msg.receiver_id == CUBE_ID:
-                    self.ackReact(msg)
+            with self.states_lock:
+                message_logger.info("wallthermostat control update %s" % msg)
+                self.states[msg.sender_id].update(msg.decoded_payload)
+                self.states[msg.sender_id]['last_updated'] = datetime.now()
+                self.states[msg.sender_id]['signal_strenth'] = signal_strenth
+            return
+
+        elif isinstance(msg, PushButtonStateMessage):
+            with self.states_lock:
+                message_logger.info("pushbutton update %s" % msg)
+                self.states[msg.sender_id].update(msg.decoded_payload)
+                self.states[msg.sender_id]['last_updated'] = datetime.now()
+                self.states[msg.sender_id]['signal_strenth'] = signal_strenth
             return
 
         message_logger.warning("Unhandled Message of type %s, contains %s" % (msg.__class__.__name__, str(msg)))
