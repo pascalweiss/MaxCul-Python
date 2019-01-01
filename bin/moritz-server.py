@@ -141,8 +141,8 @@ def index():
 
 @app.route("/current_states")
 def current_states():
-    with message_thread.states_lock:
-        return json.dumps(message_thread.states, indent=4, sort_keys=True, cls=JSONWithDateEncoder)
+    with message_thread.thermostat_states_lock:
+        return json.dumps(message_thread.thermostat_states, indent=4, sort_keys=True, cls=JSONWithDateEncoder)
 
 
 @app.route("/get_devices")
